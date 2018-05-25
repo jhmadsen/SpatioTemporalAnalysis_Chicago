@@ -1,0 +1,1164 @@
+---
+title: "Spatio Temporal Analysis of Crime in Chicago"
+author: "Jacob"
+date: "February 20, 2018"
+output:
+  html_document:
+    df_print: paged
+    code_folding: hide
+---
+
+### Problem
+Chicago has severe problems with crimes. With 667 homicides in 2017, Chicago had more homicides than Los Angeles and New York City combined, with 282 and 290 homicides, respectively. This is despite of a combined population of Los Angeles and New York City of 12.4 million, compared to 2.7 million for Chicago. Moreover, from the beginning of 2014 to start 2018, Chicago has had 71929 violent assaults, 54975 burglaries and 42721 motor vehicle thefts.  
+However, the crimes are not equally spatial distributed and also have fluctuations over time, meaning that some communities have higher frequency of certain crimes than others and some crimes occour more frequent in certain months. Although it is a well-known postulate that poverty correlates with criminal behavior, the fluctuations and spatial distribution of crimes remains unexplained. 
+  
+  
+### Research question
+The main objective of this paper is to contribute to the understanding crimes in Chicago and create an insight as to why crimes occour at a certain place and time. To achieve this goal, the main research question to be answered in this paper is:
+
+**How can you explain fluctuations in different acts of crimes, from an aspect of weather and socio-economic factors?**
+  
+  
+### Methodology & limitations
+To answer the research question, four different datasets from various sources are identified and imported. The main dataset, containing records of crimes, is downloaded from city of Chicago and contains the type of crime and detailed spatio-temporal information such as longitude and latitude and time of occourence. To limit the scope of the paper, the period of 01-01-2014 to 31-12-2017 is chosen. 
+
+For the socio-economic perspective of crimes, a dataset containing polygons of Chicago citys defined communities and a dataset containing socio-economic factors for the respective communities, are downloaded.
+For the weather perspective of crimes, a dataset containing daily weather observations is downloaded.
+
+Initially it was desired to explain acts of ten different types of crime, but as the paper progressed it showed to be too big of a task to overcome. Thus, four different acts of crimes are selected as interesting crimes to try to explain: homicides, assaults, burglaries and motor vehicle thefts.
+
+To explain fluctuations in crimes from a socio-economic perspective, linear and non-linear regression analysis is carried out between the relative crime figures for communities and their respective socio-economic status, consisting of nine independent variables. To overcome the issue of multicolinearity, the nine socio-economic variables are reduced to one principal component, used to check for dependency against the dependent crime variables. 
+
+To explain fluctuations in crimes from a weather perspective, linear regression analysis is carried out between a temperature variable and the frequency of crimes, given a certain timespan. 
+
+```{r libraries, include=FALSE}
+library(plyr)
+library(corrplot)
+library(reshape)
+library(ggplot2)
+library(gridExtra)
+library(Hmisc)
+library(lubridate)
+library(pracma)
+library(sp)
+library(rgdal)
+library(rgeos)
+library(gstat)
+library(geosphere)
+library(lmtest)
+```
+
+## Importing data
+
+
+```{r import data}
+#Importing polygons
+chicagoAreas <- readOGR(dsn='Polygons', "CommAreas")
+chicagoAreas <- spTransform(chicagoAreas, CRS("+proj=longlat +datum=WGS84")) #converting to WGS84
+
+#Importing crime data
+chicagoCrime <- read.csv('Crimes_-_2001_to_present.csv', header = TRUE, sep=",")
+
+#Importing socio-economic data
+chicagoSocio <- read.csv('ChicagoSocioeconomic.csv', header = TRUE, sep = ",")
+
+#Importing weather data
+chicagoWeather <- read.csv('ChicagoWeather.csv', header = TRUE, sep = ",")
+
+
+
+```
+
+## Inspecting and commenting on data
+
+#### Communities of Chicago
+
+```{r, fig.align='center'}
+plot(chicagoAreas)
+```
+
+The 'chicagoAreas' SpatialPolygonsDataFrame contains 77 polygons defined as communities of Chicago by the city council. The large polygon in top left corner is O'Hare International Airport. 
+
+<br>
+
+#### Crimes data
+
+```{r}
+head(chicagoCrime)
+```
+
+The 'chicagoCrime' data.frame contains data on crimes. The variable **_Primary.Type_** specify which act of crime the record regards, **_Community.Area_** specify which of the 77 community areas the crimes was committed within and **_Date_** specify which date the crime was comitted. 
+
+To get an idea about the scope of crimes, a bar chart is created with the initial ten crimes desired to explain. 
+
+```{r, fig.align='center'}
+crimesCount <- as.data.frame(sort(table(chicagoCrime$Primary.Type)))
+
+#Count of crimes
+ggplot(data=crimesCount, aes(x=Var1, Freq))+
+  geom_bar(stat='identity', fill='#36648B', width = 0.75)+
+  geom_text(aes(label=Freq), hjust=-0.3, size=3)+
+  coord_flip()+
+  labs(y='Frequency', x='Crime', title='Type of crimes')+
+  scale_x_discrete(expand = c(0.05,0))+
+  scale_y_continuous(expand = c(0,0), limits = c(0, 100000))+
+  theme(panel.background = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+<br>
+
+#### Socio-economic data for communities 
+
+
+```{r}
+head(chicagoSocio)
+```
+
+The 'chicagoSocio' data.frame contains socioeconomic data for the 77 communities. **_HHmedianIncome_** is median household income, **_HHtotal_** is the number of households, **_PropWhite_**, **_PropBlack_**, **_PropLatino_** and **_PropAsian_** is the proportion of population categorized in to the four respective ethnicities, **_HousingCrowded_** is the proportion of households living in a household categorized as 'crowded', **_HHbelowPovertry_** is the proportion of households below a defined poverty threshold, **_Unemployment_** is the proportion with age +16 that are unemployed, **_NoHighSchool_** is the proportion of the population with age +25 holding no high school diploma, **_PerCapitaIncome_** is the average income per capita and **_PropVacant_** is the proportion of properties that are vacant.
+
+<br>
+
+#### Weather data
+
+```{r}
+head(chicagoWeather)
+```
+
+The 'chicagoWeather' data.frame contains daily weather observations in the period specified in limitations. **_SLPhigh_**, **_SLPavg_** and **_SLPlow_** are sea level pressure measures. 
+
+
+
+<br>
+
+## Treating data
+
+To test if socio-economic factors can describe crimes, crime data from 'chicagoCrime' is merged with 'chicagoSocio' and figures are made relative, meaning that crime figures are relative to the amount of households within the communities. That is, comparing apple with apples. 
+
+```{r treatment}
+#Selecting crimes subject to analysis
+interestCrimes <- c('HOMICIDE', 'ASSAULT', 
+                    'BURGLARY', 'MOTOR VEHICLE THEFT')
+
+crimesComArea <- table(chicagoCrime[, c('Community.Area', 'Primary.Type')])
+crimesComArea <- cbind(1:77,unclass(crimesComArea[-1, interestCrimes])) #deleting community area 0 and converting to matrix
+colnames(crimesComArea) <- c('Community', interestCrimes)
+
+
+#Merging community crimes with socio-economic data for communities
+chicagoMerged <- merge(chicagoSocio, as.matrix(crimesComArea), by='Community')
+
+
+#Making crime figures relative to number of community households
+relCrimesNames <- c('RelHOMICIDE', 'RelASSAULT', 
+               'RelBURGLARY', 'RelMOTOR VEHICLE THEFT')
+
+relCrimes <- (crimesComArea[,interestCrimes]/chicagoMerged$HHtotal)*100 #multiplied with 100
+colnames(relCrimes) <- relCrimesNames
+
+#Merging relative crime figures with other variables
+chicagoMerged <- cbind(chicagoMerged, relCrimes)
+
+
+
+```
+
+```{r}
+head(chicagoMerged)
+```
+
+The crime variables are now relative figures, being the number of x crimes per 100 households in y community. As data is aggregated over a time span of four years, **_RelHOMICIDE_**, **_RelASSAULT_**, **_RelBURGLARY_** and **_RelMOTOR VEHICLE THEFT_** reflects the number of the respective crime per 100 households in four years. 
+
+<br>
+
+#### Inspecting the relative crime figures
+
+To gain insight to our crime variables, kernels for each type of crime are created. 
+
+```{r, fig.align='center'}
+#Creating kernels
+KernelHomicide <- density(chicagoMerged$RelHOMICIDE)
+KernelAssault <- density(chicagoMerged$RelASSAULT)
+KernelBurglary <- density(chicagoMerged$RelBURGLARY)
+KernelMVT <- density(chicagoMerged$`RelMOTOR VEHICLE THEFT`)
+
+par(mfrow=c(2,2))
+
+{plot(KernelHomicide, col='#36648B', xlab='Homicide rate', main='Kernel density for homicide rate', bty='l')
+polygon(KernelHomicide, col='#36648B', border = '#36648B')}
+
+{plot(KernelAssault, col='#36648B', xlab='Assault rate', main='Kernel density for assault rate', bty='l')
+polygon(KernelAssault, col='#36648B', border = '#36648B')}
+
+{plot(KernelBurglary, col='#36648B', xlab='Burglary rate', main='Kernel density for burglary rate', bty='l')
+polygon(KernelBurglary, col='#36648B', border = '#36648B')}
+
+{plot(KernelMVT, col='#36648B', xlab='Motor vehicle theft rate', main='Kernel density for motor vehicle theft rate', bty='l')
+polygon(KernelMVT, col='#36648B', border = '#36648B')}
+
+```
+
+Inspecting the kernels, the distributions are generally right skewed, meaning that some neighborhoods are observed in the tails as outliers. Interestingly, some neighborhoods have a homicide rate greater than 1, meaning that 1 out of 100 inhabitants is killed over a four year period, assuming the killed person lives in the respective community. 
+
+<br>
+
+## Explorative data analysis - spatial
+
+To gain insight for the spatial distribution of socio-economic factors, we plot the factors with the given polygons for the communities. 
+
+```{r, fig.align='center'}
+#Converting to data frame for ggplot usage
+chicagoAreas@data$id <- chicagoAreas@data$AREA_NUMBE
+
+comPoints <- fortify(chicagoAreas, region='id')
+
+comDF <- merge(comPoints, chicagoMerged, by.x='id', by.y='Community')
+
+socioPolygons <- list(plot=list())
+
+#Assigning proper chart titles to variables
+socioVariables <- list('HHmedianIncome'='Median Household Income','PropBlack'='Proportion of Blacks','PropWhite'='Proportion of Whites','PropLatino'='Proportion of Latinos', 'HousingCrowded'='Crowded Housing','HHbelowPovertry'='Households Below Povertry', 'Unemployment'='Unemployment','NoHighSchool'='No High School Diploma','PropVacant'='Proportion of Vacant Properties')
+
+#Creating for-loop to assign plots to list 
+for(i in 1:length(socioVariables)){
+  
+  temp.df <- comDF[,c('long','lat','group',names(socioVariables)[i])]
+  names(temp.df) <- c('long','lat','group','variable')
+  
+  socioPolygons$plot[[i]] <- ggplot(temp.df, aes(long, lat, group=group, fill=variable))+
+    geom_polygon()+
+    geom_path(colour='grey50')+
+    coord_equal()+
+    labs(title=socioVariables[[i]], fill='Value')+
+    theme(panel.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.15, 0.3),
+        legend.key.size = unit(0.3,'line'),
+        legend.text = element_text(size=6),
+        legend.title = element_text(size=8),
+        plot.title = element_text(size=10))
+ 
+}
+
+
+```
+
+```{r, fig.height=3, fig.width=10}
+grid.arrange(socioPolygons$plot[[1]], socioPolygons$plot[[2]], socioPolygons$plot[[3]], socioPolygons$plot[[4]], socioPolygons$plot[[5]], ncol=5)
+```
+
+```{r, fig.height=3, fig.width=10}
+grid.arrange(socioPolygons$plot[[6]], socioPolygons$plot[[7]], socioPolygons$plot[[8]], socioPolygons$plot[[9]], ncol=4)
+```
+
+
+Inspecting the socio-economic variables, a strong polarization is apparent. Communities with high median household income are majority white, have low unemployment, have low proportion of crowded households and have few households below poverty line. Communities with low median household income are majority black, have high unemployment and have many households below poverty. 
+
+
+To gain insight of spatial distribution of crimes, we plot the relative crime figures with the given polygons for the communities. 
+
+
+```{r, fig.align='center'}
+crimePolygons <- list(plot=list())
+
+#Assigning proper chart titles to variables
+relCrimeVariables <- list('RelHOMICIDE'='Homicides', 'RelASSAULT'='Assaults', 
+                          'RelBURGLARY'='Burglaries', 'RelMOTOR VEHICLE THEFT'='Motor Vehicle Thefts')
+
+#Creating for-loop to assign plots to list
+for(i in 1:length(relCrimeVariables)){
+  
+  temp.df <- comDF[,c('long','lat','group',names(relCrimeVariables)[i])]
+  names(temp.df) <- c('long','lat','group','variable')
+  
+  crimePolygons$plot[[i]] <- ggplot(temp.df, aes(long, lat, group=group, fill=variable))+
+    geom_polygon()+
+    geom_path(colour='grey50')+
+    coord_equal()+
+    labs(title=relCrimeVariables[[i]], fill='Value')+
+    theme(panel.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.15, 0.3),
+        legend.key.size = unit(0.3,'line'),
+        legend.text = element_text(size=6),
+        legend.title = element_text(size=8),
+        plot.title = element_text(size=10))
+ 
+}
+
+grid.arrange(crimePolygons$plot[[1]], crimePolygons$plot[[2]], crimePolygons$plot[[3]], crimePolygons$plot[[4]], ncol=2)
+
+
+```
+
+
+Inspecting the crime variables, there seems to be a strong multicolinearity among the variables. Returning to the previous plot of socio-economic factors, the crimes are mostly committed within communities with low median household income with majority of blacks. Interestingly, community 76 (O'Hare International Airport) has relatively high numbers of motor vehicle thefts while community 32 (Loop) being the fifth richest community (median household income: 78124 USD) has a relative high number of assaults. Taking in to consideration that Loop is the very center of Chicago, nightlife might be an explaining factor.
+
+To put some figures on the socio-economic variables and the crime variables, two correlation matrices are created. 
+
+```{r corMat, fig.align='center'}
+corMatSocio <- cor(chicagoMerged[,names(socioVariables)])
+
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))
+corrplot(corMatSocio, method = "color", col = col(200),
+         type = "upper", order = "hclust", number.cex = .7,
+         addCoef.col = "black",tl.cex = 0.7, tl.col = "black", tl.srt = 60,
+         diag = FALSE)
+
+```
+
+Inspecting the correlation matrix, **_PropWhite_** is strongly positively correlated with **_HHmedianIncome_** (0.83) and strongly negatively correlated with **_PropBlack_** (-0.79), **_Unemployment_** (-0.83) and **_HHbelowPovertry_** (-0.76). **_PropBlack_** is strongly positively correlated with **_Unemployment_** (0.80), **_HHbelowPovertry_** (0.66) and strongly negatively correlated with **_PropWhite_** (-0.79). **_PropLatino_** is strongly postively correlated with **_HousingCrowded_** (0.72) and **_NoHighSchool_** (0.77). 
+
+
+*strong correlation is defined as |cor(x,y)|<0.65
+
+<br>
+
+For our four crime variables, we simply inspect correlation with the cor() function 
+
+```{r}
+cor(chicagoMerged[,relCrimesNames])
+
+```
+
+
+```{r}
+cor(chicagoMerged[,relCrimesNames])>0.65
+
+```
+
+All correlations are strong
+
+<br>
+
+## Modelling - spatial 
+To explain variance in crimes for the communities of Chicago, we want to test dependencies between the socio-economic variables and crime variables.
+Our goal is to create a model that is significant,$p<0.05$ with $R^2$ as large as possible, where $R^2=1-\frac{SSE}{SST}$ and $SSE=\sum(\hat{y}-y)^2$ and $SST=\sum(\bar{y}-y)^2$.
+
+With 9 socio-economic factors and 4 types of crimes, we have 36 different combinations to explain the 4 dependent variables with a simple linear regression. However, the dependent variables can also be explained with a multiple linear regression, making the number of outcomes even greater, depending on the number of used independent variables. 
+
+As we have strong multicolinearity among the independent variables, demonstrated in correlation matrix, the independent variables will not be significant in a multiple linear regression, although two or more variables are significant when tested independently against the dependent variable.
+A great example of that is the sudden insignificance of **_HHmedianIncome_** when tested together with **_Unemployment_**, against the dependent variable **_RelASSAULT_**:
+
+```{r linModel1}
+simp.linear.model1 <- lm(chicagoMerged$RelASSAULT ~ chicagoMerged$HHmedianIncome)
+summary(simp.linear.model1)
+
+```
+
+Model is significant. $R^2$ of 0.51 and $p<0.001$. 
+
+```{r linModel2}
+simp.linear.model2 <- lm(chicagoMerged$RelASSAULT ~ chicagoMerged$Unemployment)
+summary(simp.linear.model2)
+```
+
+Model is significant. $R^2$ of 0.73 and $p<0.01$ - even better
+
+```{r}
+multiple.linear.model1 <- lm(chicagoMerged$RelASSAULT ~ chicagoMerged$HHmedianIncome + chicagoMerged$Unemployment)
+summary(multiple.linear.model1)
+```
+
+Model is now insignifacnt as **_HHmedianIncome_** has $p=0.45$ of being 0. We therefore accept $H_0: \beta_2=0$ and discard $H_1: \beta_2\neq0$. The model is therefore discarded. 
+
+The output of the multiple linear regression shows that **_HHmedianIncome_** becomes insignificant when tested against **_RelASSAULT_** together with **_Unemployment_**. In fact, taking the adjusted $R^2$ in to account, the result is relative worse when compared to a single linear regression with unemployment as single input variable. Thus, multicolinearity makes it impossible to run multiple linear regression. That leaves us with the possibility of only using one input variable. 
+
+Moreover, not all the relationships are linear. A great example of a non-linear relationship is median household income tested against relative number of homicides per community. 
+
+
+
+```{r, fig.align='center'}
+
+#Shortening the variable names a little
+MedianIncome <- chicagoMerged$HHmedianIncome
+RelHomicide <- chicagoMerged$RelHOMICIDE
+
+#visualizing
+ggplot()+
+  geom_point(data=chicagoMerged, aes(MedianIncome, RelHOMICIDE), colour='#36648B', size=2)+
+  scale_x_continuous(breaks=seq(10000, 100000, 20000))+
+  scale_y_continuous(breaks=seq(0, 1.5, 0.25))+
+  labs(title='Homicides',x='Median Income', y='Homicides per 100 households')+
+  theme(panel.background = element_blank())
+
+```
+
+Inspecting the relationship between **_HHmedianIncome_** and **_RelHOMICIDE_**, it is clear that the relationship is not linear but rather exponential decaying. That is, when income decrease, the homicide rate increase exponentially (or inverse). 
+
+To test this hypothesis, along with other non-linear functions, we apply a logarithmic function, a exponential decaying function, a quadratic function and a qubic function. 
+
+```{r, fig.align='center'}
+#Calculating total sum of squares for later usage when returning r-squared
+SST <- sum((RelHomicide-mean(RelHomicide))^2)
+
+#Applying different NLS models
+exp.modelNLS <- nls(RelHomicide ~ bIntercept*b1**MedianIncome, start = list(bIntercept=2, b1=1))
+
+quadratic.modelNLS <- nls(RelHomicide ~ bIntercept + b1*MedianIncome + b2*MedianIncome^2, 
+                          start=list(bIntercept=2, b1=0, b2=0))
+
+qubic.modelsNLS <- nls(RelHomicide ~ bIntercept + b1*MedianIncome + b2*MedianIncome^2 +
+                         b3*MedianIncome^3,start=list(bIntercept=2, b1=0, b2=0, b3=0))
+
+log.modelNLS <- nls(RelHomicide ~ bIntercept+(-b1*log(MedianIncome)), start=list(bIntercept=6,
+                                                                                 b1=1))
+#Returning values for the models
+exp.line <- predict(exp.modelNLS)
+quadratic.line <- predict(quadratic.modelNLS)
+qubic.line <- predict(qubic.modelsNLS)
+log.line <- predict(log.modelNLS)
+
+#Calculating sum of squared error for NLS models
+SSE.exp <- sum((exp.line-RelHomicide)^2)
+SSE.quadratic <- sum((quadratic.line-RelHomicide)^2)
+SSE.qubic <- sum((qubic.line-RelHomicide)^2)
+SSE.log <- sum((log.line-RelHomicide)^2)
+
+#Calcuating r-squared for NLS models
+RSQ.exp <- 1-(SSE.exp/SST)
+RSQ.quadratic <- 1-(SSE.quadratic/SST)
+RSQ.qubic <- 1-(SSE.qubic/SST)
+RSQ.log <- 1-(SSE.log/SST)
+
+#Making one data.frame for NLS models
+predictDF <- as.data.frame(matrix(cbind(MedianIncome, quadratic.line, qubic.line, exp.line, log.line), ncol=5))
+colnames(predictDF) <- c('MedianIncome','quadratic.line', 'qubic.line','exp.line', 'log.line')
+
+predictDF <- melt(predictDF, 'MedianIncome')
+
+#Visualizing
+plot.exp <- ggplot()+
+  geom_point(data=chicagoMerged, aes(MedianIncome, RelHOMICIDE), colour='#36648B', size=2)+
+  geom_line(data=subset(predictDF, predictDF$variable=='exp.line'), aes(MedianIncome, value, colour=variable), size=1)+
+  scale_x_continuous(breaks=seq(10000, 100000, 20000))+
+  scale_y_continuous(breaks=seq(0, 1.5, 0.25))+
+  labs(title='Homicides', x='Median Income', y='Homicide rate')+
+  theme(panel.background = element_blank(),
+        legend.position = c(0.8,0.9),
+        title = element_text(size=10))
+
+plot.quadratic <- ggplot()+
+  geom_point(data=chicagoMerged, aes(MedianIncome, RelHOMICIDE), colour='#36648B', size=2)+
+  geom_line(data=subset(predictDF, predictDF$variable=='quadratic.line'), aes(MedianIncome, value, colour=variable), size=1)+
+  scale_x_continuous(breaks=seq(10000, 100000, 20000))+
+  scale_y_continuous(breaks=seq(0, 1.5, 0.25))+
+  labs(title='Homicides', x='Median Income', y='Homicide rate')+
+  theme(panel.background = element_blank(),
+        legend.position = c(0.8,0.9),
+        title = element_text(size=10))
+
+plot.qubic <- ggplot()+
+  geom_point(data=chicagoMerged, aes(MedianIncome, RelHOMICIDE), colour='#36648B', size=2)+
+  geom_line(data=subset(predictDF, predictDF$variable=='qubic.line'), aes(MedianIncome, value, colour=variable), size=1)+
+  scale_x_continuous(breaks=seq(10000, 100000, 20000))+
+  scale_y_continuous(breaks=seq(0, 1.5, 0.25))+
+  labs(title='Homicides', x='Median Income', y='Homicide rate')+
+  theme(panel.background = element_blank(),
+        legend.position = c(0.8,0.9),
+        title = element_text(size=10))
+
+plot.log <- ggplot()+
+  geom_point(data=chicagoMerged, aes(MedianIncome, RelHOMICIDE), colour='#36648B', size=2)+
+  geom_line(data=subset(predictDF, predictDF$variable=='log.line'), aes(MedianIncome, value, colour=variable), size=1)+
+  scale_x_continuous(breaks=seq(10000, 100000, 20000))+
+  scale_y_continuous(breaks=seq(0, 1.5, 0.25))+
+  labs(title='Homicides', x='Median Income', y='Homicide rate')+
+  theme(panel.background = element_blank(),
+        legend.position = c(0.8,0.9),
+        title = element_text(size=10))
+
+grid.arrange(plot.exp, plot.quadratic, plot.qubic, plot.log, ncol=2)
+
+RSQ.exp
+RSQ.qubic
+RSQ.quadratic
+RSQ.log
+
+```
+
+<br>
+
+Inspecting the $R^2$ for the four different non-linear models for homicide rate, it is clear that the qubic and quadratic models are best, with an $R^2$ of 0.66 and 0.65, respectively. The logarithmic model returns the worst results, with an $R^2$ of 0.60 while the exponential model has an $R^2$ of 0.64. However, both the quadratic and qubic models are **overfitting**, meaning they are built too complex to fit the data, failing to fit future predictions. 
+
+For simplification, we can try to predict the homicide rate for a community with a median income of 100.000 USD. 
+
+```{r}
+sum.quadractic.modelNLS <- summary(quadratic.modelNLS)
+sum.quadractic.modelNLS
+
+predict70000 <- sum.quadractic.modelNLS$parameters[1,1]+(sum.quadractic.modelNLS$parameters[2,1]*70000)+sum.quadractic.modelNLS$parameters[3,1]*(70000^2)
+predict100000 <- sum.quadractic.modelNLS$parameters[1,1]+(sum.quadractic.modelNLS$parameters[2,1]*100000)+sum.quadractic.modelNLS$parameters[3,1]*(100000^2)
+
+predict70000
+predict100000
+
+```
+
+We can see that the quadratic model predicts increasing homicide rate for any community with median income greater than 70.000 USD, although it doesn't fit the pattern of the data. As it seems unlikely that any independent variable will have a qubic or quadratic relationship, we discard these two models for modelling.
+
+<br>
+
+We are now left with linear, logarithmic and exponential models. As multicolinearity hinders testing of multiple independent variables to explain crimes, a loop is created to test every single independent variable against the dependent variables, with the three different models. 
+
+```{r}
+
+crimesRegList <- list(RelHOMICIDE=list(results=NULL), RelASSAULT=list(results=NULL), 
+                      RelBURGLARY=list(results=NULL), RelMOTOR_VEHICLE_THEFT=list(results=NULL))
+
+
+for(i in 1:length(relCrimesNames)){
+  
+  #Temporary data.frame for each crime (dependent variables)
+  temp.df <- data.frame(Variable=rep(names(socioVariables), 3), Model=c(rep('lin', length(socioVariables)), rep('log', length(socioVariables)), rep('exp', length(socioVariables))),RSQ=rep(0,(length(socioVariables)*3)), Signi=rep(0,(length(socioVariables)*3)))
+  
+  #Iterating over the different socio-economic variables (independent variables)
+  for(j in 1:length(names(socioVariables))){
+    
+    dependent.var <- chicagoMerged[,relCrimesNames[i]]
+    independent.var <- chicagoMerged[,names(socioVariables)[j]]
+    
+    SST <- sum((dependent.var-mean(dependent.var))^2)
+    
+    #Models - if logarithmic or exponential models doesn't work it returns 0
+    lin.model <- lm(dependent.var ~ independent.var)
+    log.model <- tryCatch(nls(dependent.var ~ bIntercept+(-b1*log(independent.var)), start=list(bIntercept=6, b1=1)), error=function(e){0})
+    exp.model <- tryCatch(nls(dependent.var ~ bIntercept*b1**independent.var, start = list(bIntercept=2, b1=1)), error=function(e){0})
+    
+    
+    summary.lin.model <- summary(lin.model)
+    RSQ.lin.model <- summary.lin.model$r.squared
+    
+    #If logarithmic model doesn't work
+    if(typeof(log.model)!='list'){
+      
+      RSQ.log.model <- 0
+      
+    } else {
+      
+      summary.log.model <- summary(log.model)
+      log.model.predict <- predict(log.model)
+      RSQ.log.model <- 1-(sum((dependent.var-log.model.predict)^2)/SST)
+      Signif.log.model <- all(summary.log.model$coefficients[2,4]<0.05)
+      
+    }
+    
+    #If exponential model doesn't work
+    if(typeof(exp.model)!='list'){
+      
+      RSQ.exp.model <- 0
+      
+    } else {
+      
+      summary.exp.model <- summary(exp.model)
+      exp.model.predict <- predict(exp.model)
+      RSQ.exp.model <- 1-(sum((dependent.var-exp.model.predict)^2)/SST)
+      Signif.exp.model <- all(summary.lin.model$coefficients[2,4]<0.05)
+      
+    }
+    
+    #Paste results in to temporary data.frame
+    temp.df$RSQ[temp.df$Model=='lin'][j] <-
+      RSQ.lin.model
+    temp.df$RSQ[temp.df$Model=='log'][j] <-
+      RSQ.log.model
+    temp.df$RSQ[temp.df$Model=='exp'][j] <-
+      RSQ.exp.model
+    
+    #If model is significant, return TRUE(1) statement
+    Signif.lin.model <- all(summary.lin.model$coefficients[2,4]<0.05)
+    
+    temp.df$Signi[temp.df$Model=='lin'][j] <-
+      Signif.lin.model
+    temp.df$Signi[temp.df$Model=='log'][j] <-
+      Signif.log.model
+    temp.df$Signi[temp.df$Model=='exp'][j] <-
+      Signif.exp.model
+    
+    
+  }
+  
+  #Assign temporary data.frame as results for each dependent variable
+  crimesRegList[[i]]$results <- temp.df
+  
+}
+```
+
+We now have a data.frame for each dependent variables, showing the $R^2$ and significance-level for each model (linear, logarithmic or exponential) for each independent variable. 
+
+Unfortunately, no library has been developed to check for heteroscedasticity in NLS models in R. Therefore, we have to check for heteroscedasticity manually. To check which model that fits best, we call the created list and results assigned.
+
+```{r}
+crimesRegList$RelHOMICIDE$results
+```
+
+The best model for **_RelHOMICIDE_** is a linear model with **_HHbelowPovertry_**.
+
+```{r}
+crimesRegList$RelASSAULT$results
+```
+
+The best model for **_RelASSAULT_** is a linear model with **_Unemployment_**.
+
+
+```{r}
+crimesRegList$RelBURGLARY$results
+```
+
+The best model for **_RelBURGLARY_** is a linear model with **_Unemployment_**.
+
+```{r}
+crimesRegList$RelMOTOR_VEHICLE_THEFT$results
+```
+
+The best model for **_RelMOTORVEHICLETHEFT_** is a linear model with **_HHbelowPovertry_**.
+
+
+We now have the best model for each dependent variables, satisfying a significance threshold of 0.01. 
+
+### Results with original data
+```{r, fig.align='center'}
+par(mfrow=c(2,2))
+{plot(chicagoMerged$HHbelowPovertry, chicagoMerged$RelHOMICIDE, pch= 16, cex = 1.3, col = "#36648B", main = "Homicides", xlab = "Households below povertry", ylab = "Homicides", bty='l')
+abline(lm(chicagoMerged$RelHOMICIDE ~ chicagoMerged$HHbelowPovertry), col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$Unemployment, chicagoMerged$RelASSAULT, pch= 16, cex = 1.3, col = "#36648B", main = "Assaults", xlab = "Unemployment", ylab = "Assaults", bty='l')
+abline(lm(chicagoMerged$RelASSAULT ~ chicagoMerged$Unemployment), col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$Unemployment, chicagoMerged$RelBURGLARY, pch= 16, cex = 1.3, col = "#36648B", main = "Burglaries", xlab = "Unemployment", ylab = "Burglaries", bty='l')
+abline(lm(chicagoMerged$RelBURGLARY ~ chicagoMerged$Unemployment), col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$HHbelowPovertry, chicagoMerged$`RelMOTOR VEHICLE THEFT`, pch= 16, cex = 1.3, col = "#36648B", main = "Motor Vehicle Thefts", xlab = "Households Below Povertry", ylab = "Motor Vehicle Thefts", bty='l')
+abline(lm(chicagoMerged$`RelMOTOR VEHICLE THEFT` ~ chicagoMerged$HHbelowPovertry), col='#fb6a4a', lwd=2)}
+
+```
+
+Inspecting the linear models, the result does not look promising with respect to homoscadicity We test it with a Breusch-Pagan test.
+
+```{r}
+bptest(lm(chicagoMerged$RelHOMICIDE ~ chicagoMerged$HHbelowPovertry))
+bptest(lm(chicagoMerged$RelASSAULT ~ chicagoMerged$Unemployment))
+bptest(lm(chicagoMerged$RelBURGLARY ~ chicagoMerged$Unemployment))
+bptest(lm(chicagoMerged$`RelMOTOR VEHICLE THEFT` ~ chicagoMerged$Unemployment))
+
+```
+
+All models but **_RelASSAULT_** with **_Unemployment_** as independent variable, have heteroscedicty as $p<0.05$, meaning we discard the null hypothesis of homoscedacity and accept alternative hypothesis of heteroscedacity. Even for **_RelASSAULT_** the result is very narrow as $p=0.055$. 
+
+<br>
+
+To see if we can return better results with alternative models, without heteroscedacity, we try out with the variable **_HHmedianIncome_** as it returns promosing results in the previous shown results. 
+
+```{r, fig.align='center'}
+
+nls.homicide.orig <- nls(chicagoMerged$RelHOMICIDE ~ bIntercept*b1**chicagoMerged$HHmedianIncome, data=chicagoMerged, start = list(bIntercept=2, b1=1))
+
+nls.assault.orig <- nls(chicagoMerged$RelASSAULT ~ bIntercept*b1**chicagoMerged$HHmedianIncome, data=chicagoMerged, start = list(bIntercept=2, b1=1))
+
+nls.burglary.orig <- nls(chicagoMerged$RelBURGLARY ~ bIntercept*b1**chicagoMerged$HHmedianIncome, data=chicagoMerged, start = list(bIntercept=2, b1=1))
+
+dependent.var <- chicagoMerged$`RelMOTOR VEHICLE THEFT`
+nls.motorVehicleTheft.orig <- nls(dependent.var ~ bIntercept*b1**chicagoMerged$HHmedianIncome, data=chicagoMerged, start = list(bIntercept=2, b1=1))
+
+predict.nls.homicide.orig <- predict(nls.homicide.orig)
+predict.nls.assault.orig <- predict(nls.assault.orig)
+predict.nls.burglary.orig <- predict(nls.burglary.orig)
+predict.nls.motorVehicleTheft.orig <- predict(nls.motorVehicleTheft.orig)
+
+merged.homicide <- data.frame(MedianIncome=chicagoMerged$HHmedianIncome, NLS=predict.nls.homicide.orig)
+merged.homicide <- merged.homicide[order(MedianIncome),]
+
+merged.assault <- data.frame(MedianIncome=chicagoMerged$HHmedianIncome, NLS=predict.nls.assault.orig)
+merged.assault <- merged.assault[order(MedianIncome),]
+
+merged.burglary <- data.frame(MedianIncome=chicagoMerged$HHmedianIncome, NLS=predict.nls.burglary.orig)
+merged.burglary <- merged.burglary[order(MedianIncome),]
+
+merged.motorVehicleTheft <- data.frame(MedianIncome=chicagoMerged$HHmedianIncome, NLS=predict.nls.motorVehicleTheft.orig)
+merged.motorVehicleTheft <- merged.motorVehicleTheft[order(MedianIncome),]
+
+
+
+par(mfrow=c(2,2))
+
+
+{plot(chicagoMerged$HHmedianIncome, chicagoMerged$RelHOMICIDE, pch= 16, cex = 1.3, col = "#36648B", main = "Homicides", xlab = "Median income", ylab = "Homicides", bty='l')
+lines(merged.homicide$MedianIncome, merged.homicide$NLS, col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$HHmedianIncome, chicagoMerged$RelASSAULT, pch= 16, cex = 1.3, col = "#36648B", main = "Assaults", xlab = "Median income", ylab = "Assaults", bty='l')
+lines(merged.homicide$MedianIncome, merged.assault$NLS, col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$HHmedianIncome, chicagoMerged$RelBURGLARY, pch= 16, cex = 1.3, col = "#36648B", main = "Burglaries", xlab = "Median income", ylab = "Burglaries", bty='l')
+lines(merged.homicide$MedianIncome, merged.burglary$NLS, col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$HHmedianIncome, chicagoMerged$`RelMOTOR VEHICLE THEFT`, pch= 16, cex = 1.3, col = "#36648B", main = "Motor Vehicle Thefts", xlab = "Median income", ylab = "Motor Vehicle Thefts", bty='l')
+lines(merged.homicide$MedianIncome, merged.motorVehicleTheft$NLS, col='#fb6a4a', lwd=2)}
+
+```
+
+Inspecting the results visualy, the exponentially decaying model for **_RelASSAULT_** and **_RelMOTORVEHICLETHEFT_** looks promising.     
+However, heteroscadicity easily fools the eye and as no library has been developed to test for heteroscedacity in non-linear regression in R, we are left with the only option of visualy inspecting variance in the residuals. 
+
+```{r, fig.align='center'}
+par(mfrow=c(2,2))
+
+plot(chicagoMerged$HHmedianIncome, (chicagoMerged$RelHOMICIDE-predict.nls.homicide.orig), ylim=c(-1, 1), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Homicides", bty='l')
+
+plot(chicagoMerged$HHmedianIncome, (chicagoMerged$RelASSAULT-predict.nls.assault.orig), ylim=c(-15, 15), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Assaults", bty='l')
+
+plot(chicagoMerged$HHmedianIncome, c(chicagoMerged$RelBURGLARY-predict.nls.burglary.orig), ylim=c(-10, 10), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Burglaries", bty='l')
+
+plot(chicagoMerged$HHmedianIncome, c(chicagoMerged$`RelMOTOR VEHICLE THEFT`-predict.nls.motorVehicleTheft.orig), ylim=c(-5, 5), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Motor Vehicle Thefts", bty='l')
+
+```
+
+Clear heteroscadicity in all models.
+
+<br>
+
+To see if we can overcome the heteroscedasticity- and multicolinearity issue, we try to run a principal component analysis on the independent variables, transforming them in to fewer variables.
+
+```{r, fig.align='center'}
+#Creating principal components
+SocioPCA <- princomp(scale(chicagoSocio[,names(socioVariables)]))
+
+#Creating data.frame for scree plot
+screeDF <- as.data.frame(matrix(SocioPCA$sdev^2), ncol=1)
+rownames(screeDF) <- names(SocioPCA$sdev)
+
+#Scree plot
+ggplot(screeDF, aes(x=reorder(rownames(screeDF),-V1), V1))+
+  geom_bar(stat = 'identity', width = 0.6, fill='#36648B')+
+  geom_text(aes(label=round(V1,2)), vjust=-0.7, size=3)+
+  scale_y_continuous(expand = c(0, 0), limits = c(0,6))+
+  labs(x='Principal Component', y='Variance explained', title='Scree Plot', subtitle='Variance explained by principal components')+
+  theme(panel.background = element_blank())
+
+```
+
+Inspecting the scree plot, the first and second principal component accounts for a variance of 4.87 and 2.75, respectively, meaning they together make up 84,6% of the total variance of 9. 
+
+
+```{r}
+corPCA <- as.data.frame(t(cor(SocioPCA$scores[,1:2], chicagoSocio[,names(socioVariables)])))
+corPCA$RSQcomp.1 <- corPCA$Comp.1^2
+corPCA$RSQcomp.2 <- corPCA$Comp.2^2
+
+data.frame(Variables=names(socioVariables), Cor.PC1=round(corPCA$Comp.1,3), Cor.PC2=round(corPCA$Comp.2,3), RSQ.PC1=round(corPCA$RSQcomp.1,3), RSQ.PC2=round(corPCA$RSQcomp.2,3))
+
+```
+
+
+
+Not surprisingly, the first principal component has a strong positive correlation with **_HHmedianIncome_** (0.92) and **_PropWhite_** (0.90) while having a strong negative correlation with **_PropBlack_** (-0.76), **_HHbelowPovertry_** (-0.92), **_Unemployment_** (-0.92) and **_PropVacant_** (-0.74). Communities with a postive score on the first principal component are therefore characterised by high median household income, a large proportion of whites, low proportion of blacks, few households below poverty line, low unemployment rate and few vacant properties, while a negative score indicates the opposite. 
+
+The second principal component has a strong positive correlation with **_PropLatino_** (0.95), **_HousingCrowded_** (0.85) and **_NoHighSchool_** (0.83). Communities with positive score for the second principal component are therefore characterised by a large proportion of latinos, crowded households and no high school diploma. Interestingly, the correlation for **_Unemployment_** is very low (-0.17), meaning that having no high school diploma does not correlate with unemployment.
+
+To sum it up, the first principal component reflects the polarization of wealthy predominately white neighborhoods and poor predominately black neighborhoods, while the second principal component reflects uneducated predominately latino neighborhoods. 
+
+
+To visualize the principal components for communities, we use the scores produced by prcomp().
+
+```{r, fig.align='center'}
+YscoresDF <- as.data.frame(as.matrix(SocioPCA$scores[,1:2]))
+YscoresDF$id <- 1:nrow(YscoresDF)
+
+comDF.pca <- merge(comPoints, YscoresDF, by.x='id', by.y='id')
+
+p1 <- ggplot(comDF.pca, aes(long, lat, group=group, fill=comDF.pca$Comp.1))+
+  geom_polygon()+
+  geom_path(colour='grey50')+
+  coord_equal()+
+  labs(title='PC1', fill='Value')+
+  scale_fill_gradient2(low = '#a50f15', mid = "white",
+  high = "blue", midpoint = 0)+
+  theme(panel.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.15, 0.3),
+        legend.key.size = unit(0.5,'line'),
+        legend.text = element_text(size=8))
+
+
+p2 <- ggplot(comDF.pca, aes(long, lat, group=group, fill=comDF.pca$Comp.2))+
+  geom_polygon()+
+  geom_path(colour='grey50')+
+  coord_equal()+
+  labs(title='PC2', fill='Value')+
+  scale_fill_gradient(low='white', high='#fe9929')+
+  theme(panel.background = element_blank(),
+        axis.title = element_blank(),
+        axis.text = element_blank(),
+        axis.ticks = element_blank(),
+        legend.position = c(0.15, 0.3),
+        legend.key.size = unit(0.5,'line'),
+        legend.text = element_text(size=8))
+
+PC1 <- SocioPCA$scores[,1]
+PC2 <- SocioPCA$scores[,2]
+
+chicagoMerged <- cbind(chicagoMerged, PC1, PC2)
+
+grid.arrange(p1, p2, ncol=2)
+
+```
+
+
+### Results with PC1
+
+We try to use PC1 as independent variable, reflecting the socio-economic status of communities.
+
+```{r, fig.align='center'}
+nls.homicide.pc1 <- nls(chicagoMerged$RelHOMICIDE ~ bIntercept*b1**chicagoMerged$PC1, data=chicagoMerged, start = list(bIntercept=5, b1=0.9))
+nls.assault.pc1 <- nls(chicagoMerged$RelASSAULT ~ bIntercept*b1**chicagoMerged$PC1, data=chicagoMerged, start = list(bIntercept=5, b1=0.9))
+
+predict.nls.homicide.pc1 <- predict(nls.homicide.pc1)
+predict.nls.assault.pc1 <- predict(nls.assault.pc1)
+predict.l.burglary <- predict(lm(chicagoMerged$RelBURGLARY ~ chicagoMerged$PC1))
+predict.l.motorVehicleTheft <- predict(lm(chicagoMerged$`RelMOTOR VEHICLE THEFT` ~ chicagoMerged$PC1))
+
+merged.homicide <- data.frame(PC1=chicagoMerged$PC1, NLS=predict.nls.homicide.pc1)
+merged.homicide <- merged.homicide[order(PC1),]
+
+merged.assault <- data.frame(PC1=chicagoMerged$PC1, NLS=predict.nls.assault.pc1)
+merged.assault <- merged.assault[order(PC1),]
+
+par(mfrow=c(2,2))
+{plot(chicagoMerged$PC1, chicagoMerged$RelHOMICIDE, pch= 16, cex = 1.3, col = "#36648B", main = "Homicides", xlab = "PC1", ylab = "Homicides", bty='l')
+lines(merged.homicide$PC1, merged.homicide$NLS, col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$PC1, chicagoMerged$RelASSAULT, pch= 16, cex = 1.3, col = "#36648B", main = "Assaults", xlab = "PC1", ylab = "Assaults", bty='l')
+lines(merged.assault$PC1, merged.assault$NLS, col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$PC1, chicagoMerged$RelBURGLARY, pch= 16, cex = 1.3, col = "#36648B", main = "Burglaries", xlab = "PC1", ylab = "Burglaries", bty='l')
+abline(lm(chicagoMerged$RelBURGLARY ~ chicagoMerged$PC1), col='#fb6a4a', lwd=2)}
+
+{plot(chicagoMerged$PC1, chicagoMerged$`RelMOTOR VEHICLE THEFT`, pch= 16, cex = 1.3, col = "#36648B", main = "Motor Vehicle Thefts", xlab = "PC1", ylab = "Motor Vehicle Thefts", bty='l')
+abline(lm(chicagoMerged$`RelMOTOR VEHICLE THEFT` ~ chicagoMerged$PC1), col='#fb6a4a', lwd=2)}
+
+```
+
+The models for **_RelASSAULT_** and **_RelMOTORVEHICLETHEFT_** looks promising.
+
+<br>
+
+We test the two linear models for **_RelBURGLARY_** and **_RelMOTORVEHICLETHEFT_**.
+
+```{r}
+bptest(lm(chicagoMerged$RelBURGLARY ~ chicagoMerged$PC1))
+```
+
+```{r}
+bptest(lm(chicagoMerged$`RelMOTOR VEHICLE THEFT` ~ chicagoMerged$PC1))
+```
+
+Negative results. $p<0.05$ means we accept alternative hypothesis of heteroscadicity.
+
+<br>
+
+And again, the non-linear models of **_RelHOMICIDE_** and **_RelASSAULT_** are inspected visually. 
+
+```{r, fig.align='center'}
+par(mfrow=c(2,2))
+
+plot(chicagoMerged$PC1, (chicagoMerged$RelHOMICIDE-predict.nls.homicide.pc1), ylim=c(-1, 1), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Homicides", bty='l')
+
+plot(chicagoMerged$PC1, (chicagoMerged$RelASSAULT-predict.nls.assault.pc1), ylim=c(-10, 10), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Assaults", bty='l')
+
+plot(chicagoMerged$PC1, c(chicagoMerged$RelBURGLARY-predict.l.burglary), ylim=c(-10, 10), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Burglaries", bty='l')
+
+plot(chicagoMerged$PC1, c(chicagoMerged$`RelMOTOR VEHICLE THEFT`-predict.l.motorVehicleTheft), ylim=c(-5, 5), ylab='Residuals', xlab='PC1', pch= 16, cex = 1.3, col = "#36648B", main = "Motor Vehicle Thefts", bty='l')
+```
+
+Clear heteroscedacity. Principal component analysis did not help us to overcome heteroscedacity.
+
+<br>
+
+The only accepted model is therefore for **_RelASSAULT_** with the independent variable **_Unemployment_**.
+
+
+<br>
+
+## Explorative data analysis - temporal
+
+We inspect the temparature over time.
+
+```{r, fig.align='center'}
+#Converting time-variables for crime data
+chicagoCrime$DateUTC <- mdy_hms(chicagoCrime$Date)
+chicagoCrime$MonthYear <- paste0(substr(chicagoCrime$DateUTC, 1,7), "-01")
+chicagoCrime$MonthYear <- as.Date(chicagoCrime$MonthYear)
+chicagoCrime$Day <- substr(chicagoCrime$DateUTC, 9, 10)
+
+
+#Converting time-variables for weather data
+chicagoWeather$MonthYear <- paste0(substr(chicagoWeather$Date, 7,11),'-', substr(chicagoWeather$Date,4,5), "-01")
+chicagoWeather$MonthYear <- as.Date(chicagoWeather$MonthYear)
+
+weatherMonthly <- aggregate(chicagoWeather$tempAvg, list(chicagoWeather$MonthYear), mean)
+
+weatherTS <- ts(weatherMonthly, frequency = 12)
+weatherDecomp <- stl(weatherTS[,2], s.window = 'per')
+
+plot(weatherMonthly, type='l', col="#36648B", lwd=3, bty='l', xlab='Date', y='Average temperature (celcius)', main='Chicago temperature')
+
+```
+
+Not surprisingly, a temperature cycle is apparent.
+
+We inspect the data for the four types of crimes over time.
+
+```{r, fig.align='center'}
+
+
+homicideMonthly <- count(subset(chicagoCrime, chicagoCrime$Primary.Type=='HOMICIDE'), 'MonthYear')
+assaultMonthly <- count(subset(chicagoCrime, chicagoCrime$Primary.Type=='ASSAULT'), 'MonthYear')
+burglaryMonthly <- count(subset(chicagoCrime, chicagoCrime$Primary.Type=='BURGLARY'), 'MonthYear')
+motorvehicletheftMonthly <- count(subset(chicagoCrime, chicagoCrime$Primary.Type=='MOTOR VEHICLE THEFT'), 'MonthYear')
+
+crimesList <- list('Homicides'=homicideMonthly, 'Assaults'=assaultMonthly, 'Burglaries'=burglaryMonthly, 'Motor Vehicle Thefts'=motorvehicletheftMonthly)
+
+for(i in 1:length(crimesList)){
+  
+  crimesList[[i]]$freq <- movavg(crimesList[[i]]$freq, 3, type='s')
+  
+}
+
+crimesPlotList <- list(plot=list())
+
+for(i in 1:length(crimesList)){
+  
+  crimesPlotList$plot[[i]] <- ggplot(as.data.frame(crimesList[[i]]), 
+                                     aes(x=MonthYear, y=freq, group=1))+
+  geom_line(colour='#36648B', size=2)+
+  labs(title=names(crimesList)[i])+
+    theme(panel.background = element_blank(),
+          axis.title = element_blank())
+  
+  
+}
+
+
+grid.arrange(crimesPlotList$plot[[1]], crimesPlotList$plot[[2]],crimesPlotList$plot[[3]],crimesPlotList$plot[[4]], ncol=2)
+
+```
+
+For the four crimes, a seasonal component is apparent and very strong. Homicides, assaults and motor vehicle thefts all have an increasing trend while burglaries have a constant trend.
+
+## Modelling - temporal
+
+For temporal modelling, we test if temperature has an impact on the four different acts of crimes. 
+
+####Converting to TS objects
+
+```{r, fig.align='center'}
+
+#Homicide
+homicideTS <- ts(homicideMonthly, frequency = 12)
+homicideDecomp <- stl(homicideTS[,2], s.window = 'per')
+
+#Assault
+assaultTS <- ts(assaultMonthly, frequency = 12)
+assaultDecomp <- stl(assaultTS[,2], s.window = 'per')
+
+#Burglary
+burglaryTS <- ts(burglaryMonthly, frequency = 12)
+burglaryDecomp <- stl(burglaryTS[,2], s.window = 'per')
+
+#Motor vehicle theft
+motorvehicletheftTS <- ts(motorvehicletheftMonthly, frequency = 12)
+motorvehicletheftDecomp <- stl(motorvehicletheftTS[,2], s.window = 'per')
+
+test <- lm(assaultMonthly$freq ~ weatherMonthly$x)
+test2 <- summary(test)
+
+
+```
+
+
+<br>
+
+####Homicide
+
+```{r, fig.align='center'}
+par(mfrow=c(2,2))
+
+{plot(x=weatherMonthly$Group.1, y=weatherMonthly$x, xlab='', ylab='', axes=TRUE, type='l', col="grey20", main='Temperature and homicides', lwd=2, bty='l')
+
+par(new=TRUE)
+
+plot(x=homicideMonthly$MonthYear, y=homicideMonthly$freq, xlab='', ylab='', axes=FALSE, type='l', col='#36648B', lwd=2)
+
+mtext('Temperature', side=2, line=2.5, cex=0.8)
+mtext('Year', side=1, line=2.5, cex=0.8)
+axis(4,col.axis="black", col=NA, col.ticks=1)
+axis(1, seq(min(homicideMonthly$freq), max(homicideMonthly$freq), 1))}
+
+
+
+plot(weatherMonthly$x, homicideDecomp$time.series[,'seasonal'], ylab='Seasonal movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal", bty='l')
+
+plot(weatherMonthly$x, (homicideDecomp$time.series[,'trend']+homicideDecomp$time.series[,'seasonal']), ylab='Trend movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Season+Trend", bty='l')
+
+plot(weatherMonthly$x, homicideMonthly$freq, ylab='Remainder movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Season+Trend+Remainder", bty='l')
+```
+
+The results looks promising for the seasonal and trend component while the full model (including remainder) is discared for heteroscedacity at eyesight. We test the two other models with a simple linear regression.
+
+```{r}
+homicideWeather.model1 <- lm(homicideDecomp$time.series[,'seasonal'] ~ weatherMonthly$x)
+summary(homicideWeather.model1)
+bptest(homicideWeather.model1)
+```
+Although the regression model is significant, $p<0.05$ for the Breusch-Pagan test reveals that we have heteroscadicity. Visually inspecting the two time-series, this is however not surprising as the time-series for homicides has an increasing trend. The same trend is observed for the temperature time-series.  
+We make a test where the trend component is included.
+
+```{r}
+homicideWeather.model2 <- lm((homicideDecomp$time.series[,'seasonal']+homicideDecomp$time.series[,'trend']) ~ weatherMonthly$x)
+summary(homicideWeather.model2)
+bptest(homicideWeather.model2)
+```
+The regression model is still significant with $p<0.001$ but $R^2$ has however decreased to 0.48 compared to 0.79 for the seasonal component. But, there is however no heteroscadicity as $p=0.96$, meaning that we accept the null hypothesis of homoscadicity.
+
+
+<br>
+
+####Assault
+
+```{r, fig.align='center'}
+par(mfrow=c(2,2))
+
+{plot(x=weatherMonthly$Group.1, y=weatherMonthly$x, xlab='', ylab='', axes=TRUE, type='l', col="grey20", main='Temperature and assaults', lwd=2, bty='l')
+
+par(new=TRUE)
+
+plot(x=assaultMonthly$MonthYear, y=assaultMonthly$freq, xlab='', ylab='', axes=FALSE, type='l', col='#36648B', lwd=2)
+
+mtext('Temperature', side=2, line=2.5, cex=0.8)
+mtext('Year', side=1, line=2.5, cex=0.8)
+axis(4,col.axis="black", col=NA, col.ticks=1)
+axis(1, seq(min(assaultMonthly$freq), max(assaultMonthly$freq), 1))}
+
+
+
+plot(weatherMonthly$x, assaultDecomp$time.series[,'seasonal'], ylab='Seasonal movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal", bty='l')
+
+plot(weatherMonthly$x, (assaultDecomp$time.series[,'trend']+assaultDecomp$time.series[,'seasonal']), ylab='Trend movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend", bty='l')
+
+plot(weatherMonthly$x, assaultMonthly$freq, ylab='Remainder movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend+Remainder", bty='l')
+```
+
+The result looks promising for all components. We test the seasonal and trend component. 
+
+```{r}
+assaultWeather.model1 <- lm((assaultDecomp$time.series[,'seasonal']) ~ weatherMonthly$x)
+summary(assaultWeather.model1)
+bptest(assaultWeather.model1)
+```
+
+The regression model is significant with $p<0.001$, meaning we discard the null hypothesis of $H_0: \beta_2=0$ and accept $H_1: \beta_2\neq0$. $R^2$ of 0.8 tells us that we can explain 80% of the variance in the seasonal component with the indepedent variable temperature. Moreover, $p=0.28$ for Breusch-Pagan test reveals that we have homoscadicity. 
+
+```{r}
+assaultWeather.model2 <- lm((assaultDecomp$time.series[,'seasonal']+assaultDecomp$time.series[,'trend']) ~ weatherMonthly$x)
+summary(assaultWeather.model2)
+bptest(assaultWeather.model2)
+```
+
+The regression model is significant with $p<0.001$, meaning we discard the null hypothesis of $H_0: \beta_2=0$ and accept $H_1: \beta_2\neq0$. $R^2$ of 0.77 is still a very nice result, telling us that we can explain 77% of the variance in the seasonal and trend component combined, with the indepedent variable temperature. Moreover, $p=0.94$ for Breusch-Pagan test reveals that we have homoscadicity. 
+
+<br>
+
+####Burglary
+
+```{r, fig.align='center'}
+
+par(mfrow=c(2,2))
+
+{plot(x=weatherMonthly$Group.1, y=weatherMonthly$x, xlab='', ylab='', axes=TRUE, type='l', col="grey20", main='Temperature and burglaries', lwd=2, bty='l')
+
+par(new=TRUE)
+
+plot(x=burglaryMonthly$MonthYear, y=burglaryMonthly$freq, xlab='', ylab='', axes=FALSE, type='l', col='#36648B', lwd=2)
+
+mtext('Temperature', side=2, line=2.5, cex=0.8)
+mtext('Year', side=1, line=2.5, cex=0.8)
+axis(4,col.axis="black", col=NA, col.ticks=1)
+axis(1, seq(min(burglaryMonthly$freq), max(burglaryMonthly$freq), 1))}
+
+
+
+plot(weatherMonthly$x, burglaryDecomp$time.series[,'seasonal'], ylab='Seasonal movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal", bty='l')
+
+plot(weatherMonthly$x, (burglaryDecomp$time.series[,'trend']+burglaryDecomp$time.series[,'seasonal']), ylab='Trend movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend", bty='l')
+
+plot(weatherMonthly$x, burglaryMonthly$freq, ylab='Remainder movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend+Remainder", bty='l')
+```
+
+The results are not promising for **_RelBURGLARY_**. Based on eye sight, there is no reason to test them for dependencies. 
+
+<br>
+
+####Motor Vehicle Theft
+
+```{r, fig.align='center'}
+
+par(mfrow=c(2,2))
+
+{plot(x=weatherMonthly$Group.1, y=weatherMonthly$x, xlab='', ylab='', axes=TRUE, type='l', col="grey20", main='Temperature and motor vehicle thefts', lwd=2, bty='l')
+
+par(new=TRUE)
+
+plot(x=motorvehicletheftMonthly$MonthYear, y=motorvehicletheftMonthly$freq, xlab='', ylab='', axes=FALSE, type='l', col='#36648B', lwd=2)
+
+mtext('Temperature', side=2, line=2.5, cex=0.8)
+mtext('Year', side=1, line=2.5, cex=0.8)
+axis(4,col.axis="black", col=NA, col.ticks=1)
+axis(1, seq(min(motorvehicletheftMonthly$freq), max(motorvehicletheftMonthly$freq), 1))}
+
+
+
+plot(weatherMonthly$x, motorvehicletheftDecomp$time.series[,'seasonal'], ylab='Seasonal movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal", bty='l')
+
+plot(weatherMonthly$x, (motorvehicletheftDecomp$time.series[,'trend']+motorvehicletheftDecomp$time.series[,'seasonal']), ylab='Trend movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend", bty='l')
+
+plot(weatherMonthly$x, motorvehicletheftMonthly$freq, ylab='Remainder movement', xlab='Temperature (celcius)', pch= 16, cex = 1.3, col = "#36648B", main = "Seasonal+Trend+Remainder", bty='l')
+```
+
+The results are not promising for **_RelMOTORVEHICLETHEFT_** either. Based on eye sight, there is no reason to test them for dependencies. 
+One could argue, that there is a certain lag between temperature and frequency of motor vehicle thefts. However, testing a model with lag would be some edgy science, as it simply wouldn't make sense that a, say 3 months lag of temperature, can explain fluctuations in motor vehicle thefts. 
+
+<br><br>
+
+##Conclusion
+
+In this paper we tried to explain fluctuations in four different types of crime, from an aspect of weather and socio-economic variables. 
+
+When examining fluctuations with socio-economic variables, a strong dependency was discovered between factors such as unemployment, median household income and households below poverty. Putting a statistical formula on the dependency was however difficult, as most models had heteroscedacity, meaning that increasing variance in the residuals foiled the attempt of explaining variance. In the end only one model had the right statistical properties:
+$$RelAssaults=-3.06+Unemployment*0.75$$
+with:
+
+$$R^2=0.73$$
+When examining fluctuations with the weather variable temperature, a strong dependency was discovered between fluctuations in temperature and fluctuations for homicides and assaults. No dependency was discovered between temperature and burglaries and temperature and motor vehicle thefts. 
+Three models were found to be significant and without heteroscadicity:
+
+$$Homicide(seasonal+trend)=37.27+temperature*1.02$$
+with: 
+$$R^2=0.48$$
+and:
+$$Assault(seasonal)=-200+temperature*17$$
+
+with:
+$$R^2=0.80$$
+and 
+$$Assault(seasonal+trend)=1281+temperature*18$$
+
+with:
+$$R^2=0.77$$
+
+It should be noticed, that the results produced in this paper, especially the results for dependencies between weather and crimes should be taken with a grain of salt, as it most likely are spurious correlations. 
