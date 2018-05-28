@@ -4,8 +4,9 @@ author: "Jacob"
 date: "February 20, 2018"
 output:
   html_document:
-    df_print: paged
     code_folding: hide
+    df_print: paged
+  pdf_document: default
 ---
 
 ### Problem
@@ -791,7 +792,7 @@ p2 <- ggplot(comDF.pca, aes(long, lat, group=group, fill=comDF.pca$Comp.2))+
   geom_path(colour='grey50')+
   coord_equal()+
   labs(title='PC2', fill='Value')+
-  scale_fill_gradient(low='white', high='#fe9929')+
+  scale_fill_gradient(low='#fe9929', high='white')+
   theme(panel.background = element_blank(),
         axis.title = element_blank(),
         axis.text = element_blank(),
